@@ -1,0 +1,135 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  OWNER
+}
+
+enum PropertyType {
+  HOUSE
+  STUDIO
+}
+
+enum ExpenseType {
+  COMMON
+  PRIVATE
+}
+
+model User {
+  id             String    @id @default(cuid())
+  username       String    @unique
+  fullName       String
+  passwordHash   String
+  role           Role
+  forceReset     Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  createdHouses  House[]
+  createdStudios Studio[]
+  payments       Payment[]
+  expenses       Expense[]
+  comments       Comment[]
+  refreshTokens  RefreshToken[]
+}
+
+model House {
+  id           String    @id @default(cuid())
+  address      String
+  floors       Int
+  apartments   Int
+  rentPrice    Float
+  layout       Json      @default("[]")
+  createdById  String
+  createdBy    User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  payments     Payment[]
+  expenses     Expense[]
+}
+
+model Studio {
+  id           String    @id @default(cuid())
+  address      String
+  monthlyRent  Float
+  createdById  String
+  createdBy    User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  payments     Payment[]
+  expenses     Expense[]
+}
+
+model Payment {
+  id            String       @id @default(cuid())
+  propertyType  PropertyType
+  month         String
+  amount        Float
+  notes         String?
+  floor         Int?
+  apartmentNumber Int?
+  date          DateTime
+  createdById   String
+  createdBy     User         @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  houseId       String?
+  house         House?       @relation(fields: [houseId], references: [id], onDelete: SetNull)
+  studioId      String?
+  studio        Studio?      @relation(fields: [studioId], references: [id], onDelete: SetNull)
+  comments      Comment[]
+  createdAt     DateTime     @default(now())
+
+  @@index([month])
+}
+
+model Expense {
+  id              String       @id @default(cuid())
+  expenseType     ExpenseType
+  propertyType    PropertyType
+  apartmentNumber String?
+  category        String
+  amount          Float
+  comment         String?
+  date            DateTime
+  createdById     String
+  createdBy       User         @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  houseId         String?
+  house           House?       @relation(fields: [houseId], references: [id], onDelete: SetNull)
+  studioId        String?
+  studio          Studio?      @relation(fields: [studioId], references: [id], onDelete: SetNull)
+  comments        Comment[]
+  createdAt       DateTime     @default(now())
+}
+
+model Comment {
+  id         String    @id @default(cuid())
+  content    String
+  paymentId  String?
+  expenseId  String?
+  payment    Payment?  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  expense    Expense?  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  createdById String
+  createdBy   User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime  @default(now())
+}
+
+model RefreshToken {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
