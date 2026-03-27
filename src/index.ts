@@ -19,9 +19,28 @@ const prisma = new PrismaClient({ adapter });
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev-refresh-secret";
 const PORT = Number(process.env.PORT || 4000);
+const allowedOrigins = new Set(
+  [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    ...(process.env.CORS_ORIGIN || "").split(","),
+  ]
+    .map((origin) => origin.trim().replace(/\/+$/, ""))
+    .filter(Boolean)
+);
 
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:3000" }));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow tools like curl/postman with no Origin header.
+      if (!origin) return callback(null, true);
+      const normalizedOrigin = origin.trim().replace(/\/+$/, "");
+      if (allowedOrigins.has(normalizedOrigin)) return callback(null, true);
+      return callback(new Error("Origine non autorisée par CORS"));
+    },
+  })
+);
 app.use(express.json());
 app.use(morgan("dev"));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 300 }));
@@ -268,9 +287,10 @@ app.post("/api/users", auth, allow(Role.ADMIN), async (req, res) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Payload invalide" });
-  const hash = await bcrypt.hash(parsed.data.password, 10);
+  const { username, fullName, role, password, forceReset } = parsed.data;
+  const hash = await bcrypt.hash(password, 10);
   const user = await prisma.user.create({
-    data: { ...parsed.data, passwordHash: hash, forceReset: parsed.data.forceReset ?? true },
+    data: { username, fullName, role, passwordHash: hash, forceReset: forceReset ?? true },
     select: { id: true, username: true, fullName: true, role: true, forceReset: true },
   });
   return res.status(201).json(user);
