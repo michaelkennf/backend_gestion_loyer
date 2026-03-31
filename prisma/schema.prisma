@@ -20,11 +20,17 @@ enum Role {
 enum PropertyType {
   HOUSE
   STUDIO
+  LAND
 }
 
 enum ExpenseType {
   COMMON
   PRIVATE
+}
+
+enum PaymentKind {
+  RENTAL_RENT
+  MONTHLY_PAYMENT
 }
 
 model User {
@@ -74,7 +80,11 @@ model Studio {
 model Payment {
   id            String       @id @default(cuid())
   propertyType  PropertyType
+  paymentKind   PaymentKind  @default(MONTHLY_PAYMENT)
+  tenantName    String?
+  contractFilePath String?
   month         String
+  monthsCount   Int?
   amount        Float
   notes         String?
   floor         Int?

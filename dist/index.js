@@ -6,12 +6,15 @@ Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
 const express_1 = __importDefault(require("express"));
 const crypto_1 = require("crypto");
+const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
 const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
 const morgan_1 = __importDefault(require("morgan"));
 const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
+const multer_1 = __importDefault(require("multer"));
 const client_1 = require("@prisma/client");
 const adapter_pg_1 = require("@prisma/adapter-pg");
 const pg_1 = require("pg");
@@ -23,8 +26,53 @@ const prisma = new client_1.PrismaClient({ adapter });
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev-refresh-secret";
 const PORT = Number(process.env.PORT || 4000);
+const AUTH_DEBUG = process.env.AUTH_DEBUG === "1" || process.env.NODE_ENV !== "production";
+const uploadsDir = path_1.default.resolve(process.cwd(), "uploads", "contracts");
+fs_1.default.mkdirSync(uploadsDir, { recursive: true });
+const storage = multer_1.default.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadsDir),
+    filename: (_req, file, cb) => {
+        const ext = path_1.default.extname(file.originalname || ".pdf") || ".pdf";
+        cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext.toLowerCase()}`);
+    },
+});
+const uploadPdf = (0, multer_1.default)({
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+        const ok = file.mimetype === "application/pdf" || file.originalname.toLowerCase().endsWith(".pdf");
+        if (!ok)
+            return cb(new Error("Seuls les fichiers PDF sont autorisés"));
+        return cb(null, true);
+    },
+});
+const allowedOrigins = new Set([
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    ...(process.env.CORS_ORIGIN || "").split(","),
+]
+    .map((origin) => origin.trim().replace(/\/+$/, ""))
+    .filter(Boolean));
 app.use((0, helmet_1.default)());
-app.use((0, cors_1.default)({ origin: process.env.CORS_ORIGIN || "http://localhost:3000" }));
+app.use((0, cors_1.default)({
+    origin: (origin, callback) => {
+        // Allow tools like curl/postman with no Origin header.
+        if (!origin)
+            return callback(null, true);
+        const normalizedOrigin = origin.trim().replace(/\/+$/, "");
+        if (allowedOrigins.has(normalizedOrigin))
+            return callback(null, true);
+        return callback(new Error("Origine non autorisée par CORS"));
+    },
+}));
+app.set("etag", false);
+app.use("/api", (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    next();
+});
+app.use("/uploads", express_1.default.static(path_1.default.resolve(process.cwd(), "uploads")));
 app.use(express_1.default.json());
 app.use((0, morgan_1.default)("dev"));
 app.use((0, express_rate_limit_1.default)({ windowMs: 15 * 60 * 1000, max: 300 }));
@@ -33,6 +81,11 @@ function signToken(user) {
 }
 function signRefreshToken(user) {
     return jsonwebtoken_1.default.sign(user, JWT_REFRESH_SECRET, { expiresIn: "7d" });
+}
+function authDebugLog(event, details) {
+    if (!AUTH_DEBUG)
+        return;
+    console.info(`[AUTH_DEBUG] ${event}`, details);
 }
 function money(value) {
     return Number(value.toFixed(2));
@@ -50,7 +103,7 @@ function auth(req, res, next) {
     }
 }
 async function propertyExists(propertyType, propertyId) {
-    if (propertyType === "house") {
+    if (propertyType === "house" || propertyType === "building") {
         const house = await prisma.house.findUnique({ where: { id: propertyId }, select: { id: true } });
         return Boolean(house);
     }
@@ -116,16 +169,24 @@ async function deleteRefreshTokenById(id) {
 }
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.post("/api/auth/login", async (req, res) => {
-    const schema = zod_1.z.object({ username: zod_1.z.string().min(1), password: zod_1.z.string().min(1) });
+    const schema = zod_1.z.object({ username: zod_1.z.string().trim().min(1), password: zod_1.z.string().min(1) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ message: "Payload invalide" });
-    const user = await prisma.user.findUnique({ where: { username: parsed.data.username } });
-    if (!user)
+    const username = parsed.data.username.trim();
+    const user = await prisma.user.findFirst({
+        where: { username: { equals: username, mode: "insensitive" } },
+    });
+    if (!user) {
+        authDebugLog("login_user_not_found", { username });
         return res.status(401).json({ message: "Identifiants invalides" });
+    }
     const ok = await bcryptjs_1.default.compare(parsed.data.password, user.passwordHash);
-    if (!ok)
+    if (!ok) {
+        authDebugLog("login_bad_password", { usernameInput: username, usernameMatched: user.username, userId: user.id });
         return res.status(401).json({ message: "Identifiants invalides" });
+    }
+    authDebugLog("login_success", { usernameInput: username, usernameMatched: user.username, userId: user.id, role: user.role });
     const payload = { id: user.id, role: user.role, username: user.username };
     const token = signToken(payload);
     const refreshToken = signRefreshToken(payload);
@@ -232,7 +293,7 @@ app.get("/api/users", auth, allow(client_1.Role.ADMIN), async (_req, res) => {
 });
 app.post("/api/users", auth, allow(client_1.Role.ADMIN), async (req, res) => {
     const schema = zod_1.z.object({
-        username: zod_1.z.string().min(3),
+        username: zod_1.z.string().trim().min(3),
         fullName: zod_1.z.string().min(3),
         role: zod_1.z.enum([client_1.Role.ADMIN, client_1.Role.MANAGER, client_1.Role.OWNER]),
         password: zod_1.z.string().min(6),
@@ -241,9 +302,17 @@ app.post("/api/users", auth, allow(client_1.Role.ADMIN), async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ message: "Payload invalide" });
-    const hash = await bcryptjs_1.default.hash(parsed.data.password, 10);
+    const username = parsed.data.username.trim().toLowerCase();
+    const { fullName, role, password, forceReset } = parsed.data;
+    const existing = await prisma.user.findFirst({
+        where: { username: { equals: username, mode: "insensitive" } },
+        select: { id: true },
+    });
+    if (existing)
+        return res.status(409).json({ message: "Identifiant déjà utilisé" });
+    const hash = await bcryptjs_1.default.hash(password, 10);
     const user = await prisma.user.create({
-        data: { ...parsed.data, passwordHash: hash, forceReset: parsed.data.forceReset ?? true },
+        data: { username, fullName, role, passwordHash: hash, forceReset: forceReset ?? true },
         select: { id: true, username: true, fullName: true, role: true, forceReset: true },
     });
     return res.status(201).json(user);
@@ -370,20 +439,23 @@ app.delete("/api/properties/studios/:id", auth, allow(client_1.Role.MANAGER), as
     await prisma.studio.delete({ where: { id } });
     res.json({ message: "Studio supprimé" });
 });
-app.post("/api/payments", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+app.post("/api/payments", auth, allow(client_1.Role.MANAGER), uploadPdf.single("contractFile"), async (req, res) => {
     const schema = zod_1.z.object({
-        propertyType: zod_1.z.enum(["house", "studio"]),
+        propertyType: zod_1.z.enum(["house", "building", "studio"]),
         propertyId: zod_1.z.string().min(1),
-        month: zod_1.z.string().regex(/^\d{4}-\d{2}$/),
-        amount: zod_1.z.number().positive(),
+        paymentKind: zod_1.z.enum(["rental", "monthly"]),
+        tenantName: zod_1.z.string().trim().min(2, "Nom du locataire requis"),
+        month: zod_1.z.string().optional(),
+        monthsCount: zod_1.z.coerce.number().int().min(1).optional(),
+        amount: zod_1.z.coerce.number().positive().optional(),
         notes: zod_1.z.string().optional(),
-        floor: zod_1.z.number().int().min(1).optional(),
-        apartmentNumber: zod_1.z.number().int().min(1).optional(),
+        floor: zod_1.z.coerce.number().int().min(1).optional(),
+        apartmentNumber: zod_1.z.coerce.number().int().min(1).optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ message: "Payload invalide" });
-    if (parsed.data.propertyType === "house") {
+    if (parsed.data.propertyType === "house" || parsed.data.propertyType === "building") {
         const house = await getHouseByIdWithLayout(parsed.data.propertyId);
         if (!house)
             return res.status(404).json({ message: "Propriete introuvable" });
@@ -402,11 +474,22 @@ app.post("/api/payments", auth, allow(client_1.Role.MANAGER), async (req, res) =
         const exists = await propertyExists(parsed.data.propertyType, parsed.data.propertyId);
         if (!exists)
             return res.status(404).json({ message: "Propriete introuvable" });
+        if (!parsed.data.amount || parsed.data.amount <= 0) {
+            return res.status(400).json({ message: "Le montant est requis pour un studio" });
+        }
     }
-    const isHouse = parsed.data.propertyType === "house";
+    if (parsed.data.paymentKind === "monthly") {
+        if (!parsed.data.month || !/^\d{4}-\d{2}$/.test(parsed.data.month)) {
+            return res.status(400).json({ message: "Mois requis au format AAAA-MM pour un paiement mensuel" });
+        }
+    }
+    else if (!parsed.data.monthsCount || parsed.data.monthsCount < 1) {
+        return res.status(400).json({ message: "Nombre de mois requis pour un loyer locatif" });
+    }
+    const isHouse = parsed.data.propertyType === "house" || parsed.data.propertyType === "building";
     const floor = parsed.data.floor ?? null;
     const apartmentNumber = parsed.data.apartmentNumber ?? null;
-    let amount = money(parsed.data.amount);
+    let amount = money(parsed.data.amount ?? 0);
     if (isHouse) {
         const house = await getHouseByIdWithLayout(parsed.data.propertyId);
         const layout = (house?.layout ?? []);
@@ -419,9 +502,13 @@ app.post("/api/payments", auth, allow(client_1.Role.MANAGER), async (req, res) =
     const payment = await prisma.payment.create({
         data: {
             propertyType: isHouse ? client_1.PropertyType.HOUSE : client_1.PropertyType.STUDIO,
+            paymentKind: parsed.data.paymentKind === "rental" ? client_1.PaymentKind.RENTAL_RENT : client_1.PaymentKind.MONTHLY_PAYMENT,
+            tenantName: parsed.data.tenantName,
+            contractFilePath: req.file ? `/uploads/contracts/${req.file.filename}` : null,
             houseId: isHouse ? parsed.data.propertyId : null,
             studioId: isHouse ? null : parsed.data.propertyId,
-            month: parsed.data.month,
+            month: parsed.data.month ?? new Date().toISOString().slice(0, 7),
+            monthsCount: parsed.data.paymentKind === "rental" ? parsed.data.monthsCount ?? 1 : null,
             amount: money(amount),
             notes: parsed.data.notes,
             ...(floor !== null ? { floor } : {}),
@@ -435,8 +522,8 @@ app.post("/api/payments", auth, allow(client_1.Role.MANAGER), async (req, res) =
 app.post("/api/expenses", auth, allow(client_1.Role.MANAGER), async (req, res) => {
     const schema = zod_1.z.object({
         expenseType: zod_1.z.enum(["common", "private"]),
-        propertyType: zod_1.z.enum(["house", "studio"]),
-        propertyId: zod_1.z.string().min(1),
+        propertyType: zod_1.z.enum(["house", "building", "studio", "land"]),
+        propertyId: zod_1.z.string().optional(),
         apartmentNumber: zod_1.z.string().optional(),
         category: zod_1.z.string().min(1),
         amount: zod_1.z.number().positive(),
@@ -446,20 +533,26 @@ app.post("/api/expenses", auth, allow(client_1.Role.MANAGER), async (req, res) =
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ message: "Payload invalide" });
-    if (parsed.data.expenseType === "private" && !parsed.data.apartmentNumber?.trim()) {
+    if (parsed.data.propertyType !== "land" && parsed.data.expenseType === "private" && !parsed.data.apartmentNumber?.trim()) {
         return res.status(400).json({ message: "Appartement requis pour une depense privee" });
     }
-    const exists = await propertyExists(parsed.data.propertyType, parsed.data.propertyId);
-    if (!exists)
-        return res.status(404).json({ message: "Propriete introuvable" });
-    const isHouse = parsed.data.propertyType === "house";
+    const isLand = parsed.data.propertyType === "land";
+    if (!isLand) {
+        if (!parsed.data.propertyId)
+            return res.status(400).json({ message: "Propriete requise" });
+        const propertyType = parsed.data.propertyType;
+        const exists = await propertyExists(propertyType, parsed.data.propertyId);
+        if (!exists)
+            return res.status(404).json({ message: "Propriete introuvable" });
+    }
+    const isHouse = parsed.data.propertyType === "house" || parsed.data.propertyType === "building";
     const expense = await prisma.expense.create({
         data: {
-            expenseType: parsed.data.expenseType === "common" ? client_1.ExpenseType.COMMON : client_1.ExpenseType.PRIVATE,
-            propertyType: isHouse ? client_1.PropertyType.HOUSE : client_1.PropertyType.STUDIO,
-            houseId: isHouse ? parsed.data.propertyId : null,
-            studioId: isHouse ? null : parsed.data.propertyId,
-            apartmentNumber: parsed.data.apartmentNumber,
+            expenseType: isLand ? client_1.ExpenseType.COMMON : (parsed.data.expenseType === "common" ? client_1.ExpenseType.COMMON : client_1.ExpenseType.PRIVATE),
+            propertyType: isLand ? client_1.PropertyType.LAND : (isHouse ? client_1.PropertyType.HOUSE : client_1.PropertyType.STUDIO),
+            houseId: !isLand && isHouse ? parsed.data.propertyId ?? null : null,
+            studioId: !isLand && !isHouse ? parsed.data.propertyId ?? null : null,
+            apartmentNumber: isLand ? undefined : parsed.data.apartmentNumber,
             category: parsed.data.category,
             amount: money(parsed.data.amount),
             comment: parsed.data.comment,
@@ -471,8 +564,11 @@ app.post("/api/expenses", auth, allow(client_1.Role.MANAGER), async (req, res) =
 });
 app.put("/api/payments/:id", auth, allow(client_1.Role.MANAGER), async (req, res) => {
     const schema = zod_1.z.object({
-        month: zod_1.z.string().regex(/^\d{4}-\d{2}$/),
+        month: zod_1.z.string().optional(),
+        monthsCount: zod_1.z.coerce.number().int().min(1).optional(),
         notes: zod_1.z.string().optional(),
+        paymentKind: zod_1.z.enum(["rental", "monthly"]).optional(),
+        tenantName: zod_1.z.string().trim().min(2).optional(),
         floor: zod_1.z.number().int().min(1).optional(),
         apartmentNumber: zod_1.z.number().int().min(1).optional(),
         amount: zod_1.z.number().positive().optional(),
@@ -484,6 +580,18 @@ app.put("/api/payments/:id", auth, allow(client_1.Role.MANAGER), async (req, res
     const existing = await prisma.payment.findUnique({ where: { id } });
     if (!existing)
         return res.status(404).json({ message: "Paiement introuvable" });
+    const nextKind = parsed.data.paymentKind
+        ? (parsed.data.paymentKind === "rental" ? client_1.PaymentKind.RENTAL_RENT : client_1.PaymentKind.MONTHLY_PAYMENT)
+        : existing.paymentKind;
+    const nextMonth = parsed.data.month ?? existing.month;
+    const existingMonthsCount = existing.monthsCount ?? null;
+    const nextMonthsCount = typeof parsed.data.monthsCount === "number" ? parsed.data.monthsCount : existingMonthsCount;
+    if (nextKind === client_1.PaymentKind.MONTHLY_PAYMENT && !/^\d{4}-\d{2}$/.test(nextMonth)) {
+        return res.status(400).json({ message: "Mois requis au format AAAA-MM pour un paiement mensuel" });
+    }
+    if (nextKind === client_1.PaymentKind.RENTAL_RENT && (!nextMonthsCount || nextMonthsCount < 1)) {
+        return res.status(400).json({ message: "Nombre de mois requis pour un loyer locatif" });
+    }
     const existingFloor = existing.floor ?? null;
     const existingApartmentNumber = existing.apartmentNumber ?? null;
     let amount = parsed.data.amount ? money(parsed.data.amount) : money(existing.amount);
@@ -506,8 +614,11 @@ app.put("/api/payments/:id", auth, allow(client_1.Role.MANAGER), async (req, res
     const updated = await prisma.payment.update({
         where: { id },
         data: {
-            month: parsed.data.month,
+            month: nextMonth,
             notes: parsed.data.notes,
+            paymentKind: nextKind,
+            monthsCount: nextKind === client_1.PaymentKind.RENTAL_RENT ? nextMonthsCount : null,
+            ...(parsed.data.tenantName ? { tenantName: parsed.data.tenantName.trim() } : {}),
             amount,
             ...(floor !== null ? { floor } : {}),
             ...(apartmentNumber !== null ? { apartmentNumber } : {}),
@@ -589,6 +700,10 @@ app.get("/api/dashboard", auth, async (_req, res) => {
         propertyType: p.propertyType === client_1.PropertyType.HOUSE ? "house" : "studio",
         propertyLabel: p.house?.address ?? p.studio?.address ?? "Inconnu",
         month: p.month,
+        paymentKind: (p.paymentKind === client_1.PaymentKind.RENTAL_RENT ? "rental" : "monthly"),
+        monthsCount: p.monthsCount ?? null,
+        tenantName: p.tenantName ?? "",
+        contractFileUrl: p.contractFilePath ?? "",
         amount: money(p.amount),
         date: p.date.toISOString(),
         notes: p.notes ?? "",
@@ -599,9 +714,9 @@ app.get("/api/dashboard", auth, async (_req, res) => {
     const expenseDto = expenses.map((e) => ({
         id: e.id,
         expenseType: e.expenseType === client_1.ExpenseType.COMMON ? "common" : "private",
-        propertyId: e.houseId ?? e.studioId,
-        propertyType: e.propertyType === client_1.PropertyType.HOUSE ? "house" : "studio",
-        propertyLabel: e.house?.address ?? e.studio?.address ?? "Inconnu",
+        propertyId: e.houseId ?? e.studioId ?? "",
+        propertyType: e.propertyType === client_1.PropertyType.LAND ? "land" : (e.propertyType === client_1.PropertyType.HOUSE ? "house" : "studio"),
+        propertyLabel: e.propertyType === client_1.PropertyType.LAND ? "Terrain" : (e.house?.address ?? e.studio?.address ?? "Inconnu"),
         apartmentNumber: e.apartmentNumber ?? "",
         category: e.category,
         amount: money(e.amount),
@@ -612,6 +727,12 @@ app.get("/api/dashboard", auth, async (_req, res) => {
     return res.json({ houses, studios, payments: paymentDto, expenses: expenseDto });
 });
 app.use((err, _req, res, _next) => {
+    if (err instanceof multer_1.default.MulterError) {
+        return res.status(400).json({ message: err.message });
+    }
+    if (err.message?.toLowerCase().includes("pdf")) {
+        return res.status(400).json({ message: err.message });
+    }
     console.error(err);
     res.status(500).json({ message: "Erreur interne serveur" });
 });
