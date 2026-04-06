@@ -83,6 +83,7 @@ type HouseRowWithLayout = {
   floors: number;
   apartments: number;
   rentPrice: number;
+  isBuilding: boolean;
   createdById: string;
   createdAt: Date;
   updatedAt: Date;
@@ -131,7 +132,7 @@ async function propertyExists(propertyType: "house" | "building" | "studio" | "l
 
 async function getHouseByIdWithLayout(id: string) {
   const rows = await prisma.$queryRaw<HouseRowWithLayout[]>`
-    SELECT "id","address","floors","apartments","rentPrice","createdById","createdAt","updatedAt","layout"
+    SELECT "id","address","floors","apartments","rentPrice","isBuilding","createdById","createdAt","updatedAt","layout"
     FROM "House"
     WHERE "id" = ${id}
     LIMIT 1
@@ -141,7 +142,7 @@ async function getHouseByIdWithLayout(id: string) {
 
 async function listHousesWithLayout() {
   return prisma.$queryRaw<HouseRowWithLayout[]>`
-    SELECT "id","address","floors","apartments","rentPrice","createdById","createdAt","updatedAt","layout"
+    SELECT "id","address","floors","apartments","rentPrice","isBuilding","createdById","createdAt","updatedAt","layout"
     FROM "House"
     ORDER BY "createdAt" DESC
   `;
@@ -373,6 +374,7 @@ app.get("/api/properties", auth, async (_req: AuthRequest, res) => {
 app.post("/api/properties/houses", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
   const schema = z.object({
     address: z.string().min(3),
+    isBuilding: z.boolean().optional(),
     levels: z.array(
       z.object({
         floor: z.number().int().min(0),
@@ -398,13 +400,15 @@ app.post("/api/properties/houses", auth, allow(Role.MANAGER), async (req: AuthRe
     0
   );
   const rentPrice = apartments > 0 ? money(totalRent / apartments) : 0;
-  const house = await (prisma.house.create as unknown as (args: unknown) => Promise<unknown>)({
+  const isBuilding = parsed.data.isBuilding ?? false;
+  const house = await prisma.house.create({
     data: {
       address: parsed.data.address,
       floors,
       apartments,
       rentPrice,
       layout: levels,
+      isBuilding,
       createdById: req.user!.id,
     },
   });

@@ -72,6 +72,8 @@ model House {
   apartments   Int
   rentPrice    Float
   layout       Json      @default("[]")
+  /// Si true : immeuble (formulaire dédié). Si false : maison.
+  isBuilding   Boolean   @default(false)
   createdById  String
   createdBy    User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
   createdAt    DateTime  @default(now())
