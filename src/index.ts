@@ -90,6 +90,23 @@ type HouseRowWithLayout = {
   layout: unknown;
 };
 
+/** Immeuble : au moins un niveau au rez-de-chaussée (floor 0), comme le formulaire « ajouter un immeuble ». */
+function layoutIndicatesBuilding(layout: unknown): boolean {
+  if (!Array.isArray(layout)) return false;
+  return layout.some((lvl) => {
+    if (typeof lvl !== "object" || lvl === null) return false;
+    return (lvl as { floor?: unknown }).floor === 0;
+  });
+}
+
+/** Rattrapage affichage/API : anciennes lignes avec isBuilding=false alors que le layout est celui d’un immeuble. */
+function normalizeHouseRow(row: HouseRowWithLayout): HouseRowWithLayout {
+  return {
+    ...row,
+    isBuilding: row.isBuilding || layoutIndicatesBuilding(row.layout),
+  };
+}
+
 function signToken(user: { id: string; role: Role; username: string }) {
   return jwt.sign(user, JWT_SECRET, { expiresIn: "8h" });
 }
@@ -137,15 +154,17 @@ async function getHouseByIdWithLayout(id: string) {
     WHERE "id" = ${id}
     LIMIT 1
   `;
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row ? normalizeHouseRow(row) : null;
 }
 
 async function listHousesWithLayout() {
-  return prisma.$queryRaw<HouseRowWithLayout[]>`
+  const rows = await prisma.$queryRaw<HouseRowWithLayout[]>`
     SELECT "id","address","floors","apartments","rentPrice","isBuilding","createdById","createdAt","updatedAt","layout"
     FROM "House"
     ORDER BY "createdAt" DESC
   `;
+  return rows.map(normalizeHouseRow);
 }
 
 async function updateHouseWithLayout(id: string, data: {
@@ -154,6 +173,7 @@ async function updateHouseWithLayout(id: string, data: {
   apartments: number;
   rentPrice: number;
   layout: unknown;
+  isBuilding: boolean;
 }) {
   await prisma.$executeRaw`
     UPDATE "House"
@@ -162,6 +182,7 @@ async function updateHouseWithLayout(id: string, data: {
         "apartments" = ${data.apartments},
         "rentPrice" = ${data.rentPrice},
         "layout" = ${JSON.stringify(data.layout)}::jsonb,
+        "isBuilding" = ${data.isBuilding},
         "updatedAt" = NOW()
     WHERE "id" = ${id}
   `;
@@ -374,7 +395,6 @@ app.get("/api/properties", auth, async (_req: AuthRequest, res) => {
 app.post("/api/properties/houses", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
   const schema = z.object({
     address: z.string().min(3),
-    isBuilding: z.boolean().optional(),
     levels: z.array(
       z.object({
         floor: z.number().int().min(0),
@@ -400,7 +420,7 @@ app.post("/api/properties/houses", auth, allow(Role.MANAGER), async (req: AuthRe
     0
   );
   const rentPrice = apartments > 0 ? money(totalRent / apartments) : 0;
-  const isBuilding = parsed.data.isBuilding ?? false;
+  const isBuilding = levels.some((l) => l.floor === 0);
   const house = await prisma.house.create({
     data: {
       address: parsed.data.address,
@@ -498,6 +518,7 @@ app.put("/api/properties/houses/:id", auth, allow(Role.MANAGER), async (req: Aut
   const apartments = levels.reduce((sum, lvl) => sum + lvl.apartments.length, 0);
   const totalRent = levels.reduce((sum, lvl) => sum + lvl.apartments.reduce((s, apt) => s + apt.rentPrice, 0), 0);
   const rentPrice = apartments > 0 ? money(totalRent / apartments) : 0;
+  const isBuilding = levels.some((l) => l.floor === 0);
 
   await updateHouseWithLayout(id, {
     address: parsed.data.address,
@@ -505,6 +526,7 @@ app.put("/api/properties/houses/:id", auth, allow(Role.MANAGER), async (req: Aut
     apartments,
     rentPrice,
     layout: levels,
+    isBuilding,
   });
   const updated = await getHouseByIdWithLayout(id);
   res.json(updated);
