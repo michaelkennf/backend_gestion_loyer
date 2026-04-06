@@ -44,10 +44,25 @@ model User {
   updatedAt      DateTime  @updatedAt
   createdHouses  House[]
   createdStudios Studio[]
+  createdLands   Land[]
   payments       Payment[]
   expenses       Expense[]
+  suppliers      Supplier[]
   comments       Comment[]
   refreshTokens  RefreshToken[]
+}
+
+model Supplier {
+  id          String    @id @default(cuid())
+  name        String
+  contact     String
+  createdById String
+  createdBy   User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  expenses    Expense[]
+
+  @@index([name])
 }
 
 model House {
@@ -77,6 +92,19 @@ model Studio {
   expenses     Expense[]
 }
 
+model Land {
+  id           String    @id @default(cuid())
+  address      String
+  size         Float
+  monthlyRent  Float
+  createdById  String
+  createdBy    User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  expenses     Expense[]
+  payments     Payment[]
+}
+
 model Payment {
   id            String       @id @default(cuid())
   propertyType  PropertyType
@@ -96,6 +124,8 @@ model Payment {
   house         House?       @relation(fields: [houseId], references: [id], onDelete: SetNull)
   studioId      String?
   studio        Studio?      @relation(fields: [studioId], references: [id], onDelete: SetNull)
+  landId        String?
+  land          Land?        @relation(fields: [landId], references: [id], onDelete: SetNull)
   comments      Comment[]
   createdAt     DateTime     @default(now())
 
@@ -117,6 +147,10 @@ model Expense {
   house           House?       @relation(fields: [houseId], references: [id], onDelete: SetNull)
   studioId        String?
   studio          Studio?      @relation(fields: [studioId], references: [id], onDelete: SetNull)
+  landId          String?
+  land            Land?        @relation(fields: [landId], references: [id], onDelete: SetNull)
+  supplierId      String?
+  supplier        Supplier?    @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   comments        Comment[]
   createdAt       DateTime     @default(now())
 }
