@@ -33,6 +33,11 @@ enum PaymentKind {
   MONTHLY_PAYMENT
 }
 
+enum RentalDepositTransactionType {
+  EXPENSE
+  REFUND
+}
+
 model User {
   id             String    @id @default(cuid())
   username       String    @unique
@@ -50,6 +55,8 @@ model User {
   suppliers      Supplier[]
   comments       Comment[]
   refreshTokens  RefreshToken[]
+  rentalDeposits RentalDeposit[]
+  rentalDepositTransactions RentalDepositTransaction[]
 }
 
 model Supplier {
@@ -80,6 +87,7 @@ model House {
   updatedAt    DateTime  @updatedAt
   payments     Payment[]
   expenses     Expense[]
+  rentalDeposits RentalDeposit[]
 }
 
 model Studio {
@@ -92,6 +100,7 @@ model Studio {
   updatedAt    DateTime  @updatedAt
   payments     Payment[]
   expenses     Expense[]
+  rentalDeposits RentalDeposit[]
 }
 
 model Land {
@@ -105,6 +114,49 @@ model Land {
   updatedAt    DateTime  @updatedAt
   expenses     Expense[]
   payments     Payment[]
+  rentalDeposits RentalDeposit[]
+}
+
+/// Garantie locative : solde retenu par logement (maison/immeuble) ou par studio / terrain.
+model RentalDeposit {
+  id               String   @id @default(cuid())
+  /// Clé stable pour upsert : house:id:floor:apt | studio:id | land:id
+  propertyUnitKey  String   @unique
+  tenantName       String
+  balance          Float
+  houseId          String?
+  house            House?   @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  studioId         String?
+  studio           Studio?  @relation(fields: [studioId], references: [id], onDelete: Cascade)
+  landId           String?
+  land             Land?    @relation(fields: [landId], references: [id], onDelete: Cascade)
+  floor            Int?
+  apartmentNumber  Int?
+  notes            String?
+  createdById      String
+  createdBy        User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  transactions     RentalDepositTransaction[]
+
+  @@index([houseId])
+  @@index([studioId])
+  @@index([landId])
+}
+
+model RentalDepositTransaction {
+  id              String                       @id @default(cuid())
+  rentalDepositId String
+  rentalDeposit   RentalDeposit                @relation(fields: [rentalDepositId], references: [id], onDelete: Cascade)
+  type            RentalDepositTransactionType
+  amount          Float
+  comment         String?
+  createdById     String
+  createdBy       User                         @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime                     @default(now())
+
+  @@index([rentalDepositId])
+  @@index([createdAt])
 }
 
 model Payment {

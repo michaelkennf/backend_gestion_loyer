@@ -123,6 +123,57 @@ function money(value: number) {
   return Number(value.toFixed(2));
 }
 
+function rentalDepositUnitKey(
+  propertyType: "house" | "building" | "studio" | "land",
+  propertyId: string,
+  floor: number | undefined,
+  apartmentNumber: number | undefined
+) {
+  if (propertyType === "studio") return `studio:${propertyId}`;
+  if (propertyType === "land") return `land:${propertyId}`;
+  return `house:${propertyId}:${floor}:${apartmentNumber}`;
+}
+
+function mapRentalDepositDto(r: {
+  id: string;
+  tenantName: string;
+  balance: number;
+  notes: string | null;
+  houseId: string | null;
+  studioId: string | null;
+  landId: string | null;
+  floor: number | null;
+  apartmentNumber: number | null;
+  updatedAt: Date;
+  house: { address: string; isBuilding: boolean } | null;
+  studio: { address: string } | null;
+  land: { address: string } | null;
+}) {
+  const address = r.house?.address ?? r.studio?.address ?? r.land?.address ?? "Inconnu";
+  const propertyType =
+    r.houseId != null ? (r.house!.isBuilding ? "building" : "house") : r.studioId != null ? "studio" : "land";
+  return {
+    id: r.id,
+    tenantName: r.tenantName,
+    balance: money(r.balance),
+    notes: r.notes ?? "",
+    propertyId: r.houseId ?? r.studioId ?? r.landId ?? "",
+    propertyLabel: address,
+    propertyType,
+    floor: r.floor,
+    apartmentNumber: r.apartmentNumber,
+    updatedAt: r.updatedAt.toISOString(),
+  };
+}
+
+async function listRentalDepositsDto() {
+  const rows = await prisma.rentalDeposit.findMany({
+    orderBy: { updatedAt: "desc" },
+    include: { house: true, studio: true, land: true },
+  });
+  return rows.map(mapRentalDepositDto);
+}
+
 function auth(req: AuthRequest, res: express.Response, next: express.NextFunction) {
   const token = req.headers.authorization?.replace("Bearer ", "");
   if (!token) return res.status(401).json({ message: "Token manquant" });
@@ -877,8 +928,125 @@ app.post("/api/comments", auth, allow(Role.OWNER), async (req: AuthRequest, res)
   res.status(201).json(comment);
 });
 
+app.post("/api/rental-deposits", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const schema = z.object({
+    propertyType: z.enum(["house", "building", "studio", "land"]),
+    propertyId: z.string().min(1),
+    tenantName: z.string().trim().min(2),
+    balance: z.number().min(0),
+    notes: z.string().optional(),
+    floor: z.coerce.number().int().min(0).optional(),
+    apartmentNumber: z.coerce.number().int().min(1).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Payload invalide" });
+  const isHouse = parsed.data.propertyType === "house" || parsed.data.propertyType === "building";
+  if (isHouse) {
+    if (!Number.isInteger(parsed.data.floor) || !parsed.data.apartmentNumber) {
+      return res.status(400).json({ message: "Niveau et appartement requis pour une maison ou un immeuble" });
+    }
+    const house = await getHouseByIdWithLayout(parsed.data.propertyId);
+    if (!house) return res.status(404).json({ message: "Propriete introuvable" });
+    const layout = house.layout as HouseLayout;
+    const level = layout.find((l) => l.floor === parsed.data.floor);
+    const apartment = level?.apartments.find((a) => a.number === parsed.data.apartmentNumber);
+    if (!level || !apartment) return res.status(400).json({ message: "Appartement invalide pour ce niveau" });
+  } else if (parsed.data.propertyType === "land") {
+    const land = await prisma.land.findUnique({ where: { id: parsed.data.propertyId } });
+    if (!land) return res.status(404).json({ message: "Terrain introuvable" });
+  } else {
+    const studio = await prisma.studio.findUnique({ where: { id: parsed.data.propertyId } });
+    if (!studio) return res.status(404).json({ message: "Studio introuvable" });
+  }
+
+  const key = rentalDepositUnitKey(
+    parsed.data.propertyType,
+    parsed.data.propertyId,
+    parsed.data.floor,
+    parsed.data.apartmentNumber
+  );
+  const row = await prisma.rentalDeposit.upsert({
+    where: { propertyUnitKey: key },
+    create: {
+      propertyUnitKey: key,
+      tenantName: parsed.data.tenantName,
+      balance: money(parsed.data.balance),
+      notes: parsed.data.notes?.trim() || null,
+      houseId: isHouse ? parsed.data.propertyId : null,
+      studioId: parsed.data.propertyType === "studio" ? parsed.data.propertyId : null,
+      landId: parsed.data.propertyType === "land" ? parsed.data.propertyId : null,
+      floor: isHouse ? parsed.data.floor! : null,
+      apartmentNumber: isHouse ? parsed.data.apartmentNumber! : null,
+      createdById: req.user!.id,
+    },
+    update: {
+      tenantName: parsed.data.tenantName,
+      balance: money(parsed.data.balance),
+      notes: parsed.data.notes?.trim() || null,
+    },
+  });
+  const withRelations = await prisma.rentalDeposit.findUnique({
+    where: { id: row.id },
+    include: { house: true, studio: true, land: true },
+  });
+  if (!withRelations) return res.status(500).json({ message: "Erreur interne" });
+  return res.status(201).json(mapRentalDepositDto(withRelations));
+});
+
+app.delete("/api/rental-deposits/:id", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const existing = await prisma.rentalDeposit.findUnique({ where: { id } });
+  if (!existing) return res.status(404).json({ message: "Garantie introuvable" });
+  await prisma.rentalDeposit.delete({ where: { id } });
+  res.json({ message: "Garantie supprimee" });
+});
+
+app.post("/api/rental-deposits/:id/transactions", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const schema = z.object({
+    kind: z.enum(["expense", "refund"]),
+    amount: z.coerce.number().positive(),
+    comment: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Payload invalide" });
+
+  const deposit = await prisma.rentalDeposit.findUnique({
+    where: { id },
+    include: { house: true, studio: true, land: true },
+  });
+  if (!deposit) return res.status(404).json({ message: "Garantie introuvable" });
+
+  const amount = money(parsed.data.amount);
+  if (amount > deposit.balance) {
+    return res.status(400).json({ message: "Montant supérieur au solde de la garantie locative" });
+  }
+
+  const nextBalance = money(deposit.balance - amount);
+  const type = parsed.data.kind === "expense" ? "EXPENSE" : "REFUND";
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.rentalDepositTransaction.create({
+      data: {
+        rentalDepositId: deposit.id,
+        type: type as any,
+        amount,
+        comment: parsed.data.comment?.trim() || null,
+        createdById: req.user!.id,
+      },
+    });
+    return tx.rentalDeposit.update({
+      where: { id: deposit.id },
+      data: { balance: nextBalance },
+      include: { house: true, studio: true, land: true },
+    });
+  });
+
+  return res.status(201).json(mapRentalDepositDto(updated as any));
+});
+
 app.get("/api/dashboard", auth, async (_req: AuthRequest, res) => {
-  const [payments, expenses, houses, studios, lands, suppliers] = await Promise.all([
+  const [payments, expenses, houses, studios, lands, suppliers, rentalDeposits] = await Promise.all([
     prisma.payment.findMany({ include: { house: true, studio: true, land: true, comments: { include: { createdBy: true } } }, orderBy: { date: "desc" } }),
     prisma.expense.findMany({
       include: { house: true, studio: true, land: true, supplier: true, comments: { include: { createdBy: true } } },
@@ -888,6 +1056,7 @@ app.get("/api/dashboard", auth, async (_req: AuthRequest, res) => {
     prisma.studio.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.land.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.supplier.findMany({ orderBy: { name: "asc" } }),
+    listRentalDepositsDto(),
   ]);
   const paymentDto = payments.map((p) => ({
     id: p.id,
@@ -925,7 +1094,15 @@ app.get("/api/dashboard", auth, async (_req: AuthRequest, res) => {
     comments: e.comments.map((c) => ({ id: c.id, content: c.content, author: c.createdBy.username, createdAt: c.createdAt.toISOString() })),
   }));
   const supplierDto = suppliers.map((s) => ({ id: s.id, name: s.name, contact: s.contact }));
-  return res.json({ houses, studios, lands, payments: paymentDto, expenses: expenseDto, suppliers: supplierDto });
+  return res.json({
+    houses,
+    studios,
+    lands,
+    payments: paymentDto,
+    expenses: expenseDto,
+    suppliers: supplierDto,
+    rentalDeposits,
+  });
 });
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
