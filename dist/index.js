@@ -202,6 +202,47 @@ function allow(...roles) {
         next();
     };
 }
+function getIdempotencyKey(req) {
+    const raw = req.header("X-Idempotency-Key");
+    if (!raw)
+        return null;
+    const value = raw.trim();
+    return value.length > 0 ? value : null;
+}
+async function loadIdempotentResponse(req) {
+    const key = getIdempotencyKey(req);
+    if (!key || !req.user)
+        return null;
+    const existing = await prisma.idempotencyKey.findUnique({ where: { key } });
+    if (!existing)
+        return null;
+    if (existing.userId !== req.user.id || existing.method !== req.method || existing.path !== req.path) {
+        return { status: 409, body: { message: "Conflit de clé d'idempotence" } };
+    }
+    return { status: existing.responseStatus, body: existing.responseBody };
+}
+async function storeIdempotentResponse(req, status, body) {
+    const key = getIdempotencyKey(req);
+    if (!key || !req.user)
+        return;
+    if (status >= 500)
+        return;
+    await prisma.idempotencyKey.upsert({
+        where: { key },
+        create: {
+            key,
+            userId: req.user.id,
+            method: req.method,
+            path: req.path,
+            responseStatus: status,
+            responseBody: body,
+        },
+        update: {
+            responseStatus: status,
+            responseBody: body,
+        },
+    });
+}
 async function createRefreshTokenRecord(userId, tokenHash, expiresAt) {
     const id = (0, crypto_1.randomUUID)();
     await prisma.$executeRaw `
@@ -390,6 +431,9 @@ app.get("/api/properties", auth, async (_req, res) => {
     res.json({ houses, studios, lands });
 });
 app.post("/api/properties/houses", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({
         address: zod_1.z.string().min(3),
         levels: zod_1.z.array(zod_1.z.object({
@@ -423,9 +467,13 @@ app.post("/api/properties/houses", auth, allow(client_1.Role.MANAGER), async (re
             createdById: req.user.id,
         },
     });
+    await storeIdempotentResponse(req, 201, house);
     res.status(201).json(house);
 });
 app.post("/api/properties/studios", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({ address: zod_1.z.string().min(3), monthlyRent: zod_1.z.number().positive() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -433,9 +481,13 @@ app.post("/api/properties/studios", auth, allow(client_1.Role.MANAGER), async (r
     const studio = await prisma.studio.create({
         data: { ...parsed.data, monthlyRent: money(parsed.data.monthlyRent), createdById: req.user.id },
     });
+    await storeIdempotentResponse(req, 201, studio);
     res.status(201).json(studio);
 });
 app.post("/api/properties/lands", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({
         address: zod_1.z.string().min(3),
         size: zod_1.z.number().positive(),
@@ -452,6 +504,7 @@ app.post("/api/properties/lands", auth, allow(client_1.Role.MANAGER), async (req
             createdById: req.user.id,
         },
     });
+    await storeIdempotentResponse(req, 201, land);
     res.status(201).json(land);
 });
 app.put("/api/properties/lands/:id", auth, allow(client_1.Role.MANAGER), async (req, res) => {
@@ -552,6 +605,9 @@ app.delete("/api/properties/studios/:id", auth, allow(client_1.Role.MANAGER), as
     res.json({ message: "Studio supprimé" });
 });
 app.post("/api/payments", auth, allow(client_1.Role.MANAGER), uploadPdf.single("contractFile"), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({
         propertyType: zod_1.z.enum(["house", "building", "studio", "land"]),
         propertyId: zod_1.z.string().min(1),
@@ -639,6 +695,7 @@ app.post("/api/payments", auth, allow(client_1.Role.MANAGER), uploadPdf.single("
             createdById: req.user.id,
         },
     });
+    await storeIdempotentResponse(req, 201, payment);
     res.status(201).json(payment);
 });
 app.get("/api/suppliers", auth, allow(client_1.Role.MANAGER), async (_req, res) => {
@@ -646,6 +703,9 @@ app.get("/api/suppliers", auth, allow(client_1.Role.MANAGER), async (_req, res) 
     res.json(rows.map((s) => ({ id: s.id, name: s.name, contact: s.contact })));
 });
 app.post("/api/suppliers", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({
         name: zod_1.z.string().trim().min(1, "Nom requis"),
         contact: zod_1.z.string().trim().min(1, "Contact requis"),
@@ -660,7 +720,9 @@ app.post("/api/suppliers", auth, allow(client_1.Role.MANAGER), async (req, res) 
             createdById: req.user.id,
         },
     });
-    res.status(201).json({ id: supplier.id, name: supplier.name, contact: supplier.contact });
+    const payload = { id: supplier.id, name: supplier.name, contact: supplier.contact };
+    await storeIdempotentResponse(req, 201, payload);
+    res.status(201).json(payload);
 });
 app.put("/api/suppliers/:id", auth, allow(client_1.Role.MANAGER), async (req, res) => {
     const schema = zod_1.z.object({
@@ -689,6 +751,9 @@ app.delete("/api/suppliers/:id", auth, allow(client_1.Role.MANAGER), async (req,
     res.json({ message: "Fournisseur supprimé" });
 });
 app.post("/api/expenses", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({
         expenseType: zod_1.z.enum(["common", "private"]),
         propertyType: zod_1.z.enum(["house", "building", "studio", "land"]),
@@ -739,6 +804,7 @@ app.post("/api/expenses", auth, allow(client_1.Role.MANAGER), async (req, res) =
             supplierId,
         },
     });
+    await storeIdempotentResponse(req, 201, expense);
     res.status(201).json(expense);
 });
 app.put("/api/payments/:id", auth, allow(client_1.Role.MANAGER), async (req, res) => {
@@ -866,6 +932,9 @@ app.delete("/api/expenses/:id", auth, allow(client_1.Role.MANAGER), async (req, 
     res.json({ message: "Dépense supprimée" });
 });
 app.post("/api/comments", auth, allow(client_1.Role.OWNER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({
         transactionType: zod_1.z.enum(["payment", "expense"]),
         transactionId: zod_1.z.string().min(1),
@@ -878,9 +947,13 @@ app.post("/api/comments", auth, allow(client_1.Role.OWNER), async (req, res) => 
         ? { paymentId: parsed.data.transactionId, createdById: req.user.id, content: parsed.data.content }
         : { expenseId: parsed.data.transactionId, createdById: req.user.id, content: parsed.data.content };
     const comment = await prisma.comment.create({ data });
+    await storeIdempotentResponse(req, 201, comment);
     res.status(201).json(comment);
 });
 app.post("/api/rental-deposits", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const schema = zod_1.z.object({
         propertyType: zod_1.z.enum(["house", "building", "studio", "land"]),
         propertyId: zod_1.z.string().min(1),
@@ -944,7 +1017,9 @@ app.post("/api/rental-deposits", auth, allow(client_1.Role.MANAGER), async (req,
     });
     if (!withRelations)
         return res.status(500).json({ message: "Erreur interne" });
-    return res.status(201).json(mapRentalDepositDto(withRelations));
+    const payload = mapRentalDepositDto(withRelations);
+    await storeIdempotentResponse(req, 201, payload);
+    return res.status(201).json(payload);
 });
 app.delete("/api/rental-deposits/:id", auth, allow(client_1.Role.MANAGER), async (req, res) => {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -955,6 +1030,9 @@ app.delete("/api/rental-deposits/:id", auth, allow(client_1.Role.MANAGER), async
     res.json({ message: "Garantie supprimee" });
 });
 app.post("/api/rental-deposits/:id/transactions", auth, allow(client_1.Role.MANAGER), async (req, res) => {
+    const cached = await loadIdempotentResponse(req);
+    if (cached)
+        return res.status(cached.status).json(cached.body);
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const schema = zod_1.z.object({
         kind: zod_1.z.enum(["expense", "refund"]),
@@ -992,7 +1070,9 @@ app.post("/api/rental-deposits/:id/transactions", auth, allow(client_1.Role.MANA
             include: { house: true, studio: true, land: true },
         });
     });
-    return res.status(201).json(mapRentalDepositDto(updated));
+    const payload = mapRentalDepositDto(updated);
+    await storeIdempotentResponse(req, 201, payload);
+    return res.status(201).json(payload);
 });
 app.get("/api/dashboard", auth, async (_req, res) => {
     const [payments, expenses, houses, studios, lands, suppliers, rentalDeposits] = await Promise.all([
@@ -1010,7 +1090,11 @@ app.get("/api/dashboard", auth, async (_req, res) => {
     const paymentDto = payments.map((p) => ({
         id: p.id,
         propertyId: p.landId ?? p.houseId ?? p.studioId ?? "",
-        propertyType: p.propertyType === client_1.PropertyType.LAND ? "land" : p.propertyType === client_1.PropertyType.HOUSE ? "house" : "studio",
+        propertyType: p.propertyType === client_1.PropertyType.LAND
+            ? "land"
+            : p.propertyType === client_1.PropertyType.HOUSE
+                ? (p.house?.isBuilding ? "building" : "house")
+                : "studio",
         propertyLabel: p.land?.address ?? p.house?.address ?? p.studio?.address ?? "Inconnu",
         month: p.month,
         paymentKind: (p.paymentKind === client_1.PaymentKind.RENTAL_RENT ? "rental" : "monthly"),
@@ -1028,7 +1112,11 @@ app.get("/api/dashboard", auth, async (_req, res) => {
         id: e.id,
         expenseType: e.expenseType === client_1.ExpenseType.COMMON ? "common" : "private",
         propertyId: e.landId ?? e.houseId ?? e.studioId ?? "",
-        propertyType: e.propertyType === client_1.PropertyType.LAND ? "land" : (e.propertyType === client_1.PropertyType.HOUSE ? "house" : "studio"),
+        propertyType: e.propertyType === client_1.PropertyType.LAND
+            ? "land"
+            : e.propertyType === client_1.PropertyType.HOUSE
+                ? (e.house?.isBuilding ? "building" : "house")
+                : "studio",
         propertyLabel: e.propertyType === client_1.PropertyType.LAND ? (e.land?.address ?? "Terrain") : (e.house?.address ?? e.studio?.address ?? "Inconnu"),
         apartmentNumber: e.apartmentNumber ?? "",
         category: e.category,

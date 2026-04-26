@@ -250,6 +250,47 @@ function allow(...roles: Role[]) {
   };
 }
 
+function getIdempotencyKey(req: express.Request) {
+  const raw = req.header("X-Idempotency-Key");
+  if (!raw) return null;
+  const value = raw.trim();
+  return value.length > 0 ? value : null;
+}
+
+async function loadIdempotentResponse(
+  req: AuthRequest
+): Promise<{ status: number; body: unknown } | null> {
+  const key = getIdempotencyKey(req);
+  if (!key || !req.user) return null;
+  const existing = await prisma.idempotencyKey.findUnique({ where: { key } });
+  if (!existing) return null;
+  if (existing.userId !== req.user.id || existing.method !== req.method || existing.path !== req.path) {
+    return { status: 409, body: { message: "Conflit de clé d'idempotence" } };
+  }
+  return { status: existing.responseStatus, body: existing.responseBody };
+}
+
+async function storeIdempotentResponse(req: AuthRequest, status: number, body: unknown) {
+  const key = getIdempotencyKey(req);
+  if (!key || !req.user) return;
+  if (status >= 500) return;
+  await prisma.idempotencyKey.upsert({
+    where: { key },
+    create: {
+      key,
+      userId: req.user.id,
+      method: req.method,
+      path: req.path,
+      responseStatus: status,
+      responseBody: body as object,
+    },
+    update: {
+      responseStatus: status,
+      responseBody: body as object,
+    },
+  });
+}
+
 type RefreshTokenRow = {
   id: string;
   tokenHash: string;
@@ -444,6 +485,8 @@ app.get("/api/properties", auth, async (_req: AuthRequest, res) => {
 });
 
 app.post("/api/properties/houses", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({
     address: z.string().min(3),
     levels: z.array(
@@ -483,20 +526,26 @@ app.post("/api/properties/houses", auth, allow(Role.MANAGER), async (req: AuthRe
       createdById: req.user!.id,
     },
   });
+  await storeIdempotentResponse(req, 201, house);
   res.status(201).json(house);
 });
 
 app.post("/api/properties/studios", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({ address: z.string().min(3), monthlyRent: z.number().positive() });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Payload invalide" });
   const studio = await prisma.studio.create({
     data: { ...parsed.data, monthlyRent: money(parsed.data.monthlyRent), createdById: req.user!.id },
   });
+  await storeIdempotentResponse(req, 201, studio);
   res.status(201).json(studio);
 });
 
 app.post("/api/properties/lands", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({
     address: z.string().min(3),
     size: z.number().positive(),
@@ -512,6 +561,7 @@ app.post("/api/properties/lands", auth, allow(Role.MANAGER), async (req: AuthReq
       createdById: req.user!.id,
     },
   });
+  await storeIdempotentResponse(req, 201, land);
   res.status(201).json(land);
 });
 
@@ -614,6 +664,8 @@ app.delete("/api/properties/studios/:id", auth, allow(Role.MANAGER), async (req,
 });
 
 app.post("/api/payments", auth, allow(Role.MANAGER), uploadPdf.single("contractFile"), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({
     propertyType: z.enum(["house", "building", "studio", "land"]),
     propertyId: z.string().min(1),
@@ -691,6 +743,7 @@ app.post("/api/payments", auth, allow(Role.MANAGER), uploadPdf.single("contractF
       createdById: req.user!.id,
     },
   });
+  await storeIdempotentResponse(req, 201, payment);
   res.status(201).json(payment);
 });
 
@@ -700,6 +753,8 @@ app.get("/api/suppliers", auth, allow(Role.MANAGER), async (_req: AuthRequest, r
 });
 
 app.post("/api/suppliers", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({
     name: z.string().trim().min(1, "Nom requis"),
     contact: z.string().trim().min(1, "Contact requis"),
@@ -713,7 +768,9 @@ app.post("/api/suppliers", auth, allow(Role.MANAGER), async (req: AuthRequest, r
       createdById: req.user!.id,
     },
   });
-  res.status(201).json({ id: supplier.id, name: supplier.name, contact: supplier.contact });
+  const payload = { id: supplier.id, name: supplier.name, contact: supplier.contact };
+  await storeIdempotentResponse(req, 201, payload);
+  res.status(201).json(payload);
 });
 
 app.put("/api/suppliers/:id", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
@@ -742,6 +799,8 @@ app.delete("/api/suppliers/:id", auth, allow(Role.MANAGER), async (req, res) => 
 });
 
 app.post("/api/expenses", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({
     expenseType: z.enum(["common", "private"]),
     propertyType: z.enum(["house", "building", "studio", "land"]),
@@ -789,6 +848,7 @@ app.post("/api/expenses", auth, allow(Role.MANAGER), async (req: AuthRequest, re
       supplierId,
     },
   });
+  await storeIdempotentResponse(req, 201, expense);
   res.status(201).json(expense);
 });
 
@@ -914,6 +974,8 @@ app.delete("/api/expenses/:id", auth, allow(Role.MANAGER), async (req, res) => {
 });
 
 app.post("/api/comments", auth, allow(Role.OWNER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({
     transactionType: z.enum(["payment", "expense"]),
     transactionId: z.string().min(1),
@@ -925,10 +987,13 @@ app.post("/api/comments", auth, allow(Role.OWNER), async (req: AuthRequest, res)
     ? { paymentId: parsed.data.transactionId, createdById: req.user!.id, content: parsed.data.content }
     : { expenseId: parsed.data.transactionId, createdById: req.user!.id, content: parsed.data.content };
   const comment = await prisma.comment.create({ data });
+  await storeIdempotentResponse(req, 201, comment);
   res.status(201).json(comment);
 });
 
 app.post("/api/rental-deposits", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const schema = z.object({
     propertyType: z.enum(["house", "building", "studio", "land"]),
     propertyId: z.string().min(1),
@@ -990,7 +1055,9 @@ app.post("/api/rental-deposits", auth, allow(Role.MANAGER), async (req: AuthRequ
     include: { house: true, studio: true, land: true },
   });
   if (!withRelations) return res.status(500).json({ message: "Erreur interne" });
-  return res.status(201).json(mapRentalDepositDto(withRelations));
+  const payload = mapRentalDepositDto(withRelations);
+  await storeIdempotentResponse(req, 201, payload);
+  return res.status(201).json(payload);
 });
 
 app.delete("/api/rental-deposits/:id", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
@@ -1002,6 +1069,8 @@ app.delete("/api/rental-deposits/:id", auth, allow(Role.MANAGER), async (req: Au
 });
 
 app.post("/api/rental-deposits/:id/transactions", auth, allow(Role.MANAGER), async (req: AuthRequest, res) => {
+  const cached = await loadIdempotentResponse(req);
+  if (cached) return res.status(cached.status).json(cached.body);
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const schema = z.object({
     kind: z.enum(["expense", "refund"]),
@@ -1041,8 +1110,9 @@ app.post("/api/rental-deposits/:id/transactions", auth, allow(Role.MANAGER), asy
       include: { house: true, studio: true, land: true },
     });
   });
-
-  return res.status(201).json(mapRentalDepositDto(updated as any));
+  const payload = mapRentalDepositDto(updated as any);
+  await storeIdempotentResponse(req, 201, payload);
+  return res.status(201).json(payload);
 });
 
 app.get("/api/dashboard", auth, async (_req: AuthRequest, res) => {
@@ -1062,7 +1132,11 @@ app.get("/api/dashboard", auth, async (_req: AuthRequest, res) => {
     id: p.id,
     propertyId: p.landId ?? p.houseId ?? p.studioId ?? "",
     propertyType:
-      p.propertyType === PropertyType.LAND ? "land" : p.propertyType === PropertyType.HOUSE ? "house" : "studio",
+      p.propertyType === PropertyType.LAND
+        ? "land"
+        : p.propertyType === PropertyType.HOUSE
+          ? (p.house?.isBuilding ? "building" : "house")
+          : "studio",
     propertyLabel: p.land?.address ?? p.house?.address ?? p.studio?.address ?? "Inconnu",
     month: p.month,
     paymentKind: (p.paymentKind === PaymentKind.RENTAL_RENT ? "rental" : "monthly"),
@@ -1080,7 +1154,12 @@ app.get("/api/dashboard", auth, async (_req: AuthRequest, res) => {
     id: e.id,
     expenseType: e.expenseType === ExpenseType.COMMON ? "common" : "private",
     propertyId: e.landId ?? e.houseId ?? e.studioId ?? "",
-    propertyType: e.propertyType === PropertyType.LAND ? "land" : (e.propertyType === PropertyType.HOUSE ? "house" : "studio"),
+    propertyType:
+      e.propertyType === PropertyType.LAND
+        ? "land"
+        : e.propertyType === PropertyType.HOUSE
+          ? (e.house?.isBuilding ? "building" : "house")
+          : "studio",
     propertyLabel:
       e.propertyType === PropertyType.LAND ? (e.land?.address ?? "Terrain") : (e.house?.address ?? e.studio?.address ?? "Inconnu"),
     apartmentNumber: e.apartmentNumber ?? "",
