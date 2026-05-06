@@ -667,6 +667,7 @@ app.post("/api/payments", auth, allow(client_1.Role.MANAGER), uploadPdf.single("
     const floor = parsed.data.floor ?? null;
     const apartmentNumber = parsed.data.apartmentNumber ?? null;
     let amount = money(parsed.data.amount ?? 0);
+    let expectedAmount = null;
     if (isHouse) {
         const house = await getHouseByIdWithLayout(parsed.data.propertyId);
         const layout = (house?.layout ?? []);
@@ -674,7 +675,18 @@ app.post("/api/payments", auth, allow(client_1.Role.MANAGER), uploadPdf.single("
         const apartment = level?.apartments.find((a) => a.number === apartmentNumber);
         if (!apartment)
             return res.status(400).json({ message: "Appartement introuvable" });
-        amount = money(apartment.rentPrice);
+        expectedAmount = money(apartment.rentPrice);
+        amount = parsed.data.amount && parsed.data.amount > 0 ? money(parsed.data.amount) : expectedAmount;
+    }
+    else if (isLand) {
+        const land = await prisma.land.findUnique({ where: { id: parsed.data.propertyId } });
+        if (land)
+            expectedAmount = money(land.monthlyRent);
+    }
+    else {
+        const studio = await prisma.studio.findUnique({ where: { id: parsed.data.propertyId } });
+        if (studio)
+            expectedAmount = money(studio.monthlyRent);
     }
     const payment = await prisma.payment.create({
         data: {
@@ -688,6 +700,7 @@ app.post("/api/payments", auth, allow(client_1.Role.MANAGER), uploadPdf.single("
             month: parsed.data.month ?? new Date().toISOString().slice(0, 7),
             monthsCount: parsed.data.paymentKind === "rental" ? parsed.data.monthsCount ?? 1 : null,
             amount: money(amount),
+            expectedAmount,
             notes: parsed.data.notes,
             ...(isHouse && floor !== null ? { floor } : {}),
             ...(isHouse && apartmentNumber !== null ? { apartmentNumber } : {}),
@@ -839,9 +852,11 @@ app.put("/api/payments/:id", auth, allow(client_1.Role.MANAGER), async (req, res
     }
     const existingFloor = existing.floor ?? null;
     const existingApartmentNumber = existing.apartmentNumber ?? null;
+    const existingExpectedAmount = existing.expectedAmount ?? null;
     let amount = parsed.data.amount ? money(parsed.data.amount) : money(existing.amount);
     let floor = parsed.data.floor ?? existingFloor;
     let apartmentNumber = parsed.data.apartmentNumber ?? existingApartmentNumber;
+    let expectedAmount = existingExpectedAmount;
     if (existing.propertyType === client_1.PropertyType.HOUSE) {
         if (!Number.isInteger(floor) || !apartmentNumber) {
             return res.status(400).json({ message: "Niveau et appartement requis pour un paiement maison" });
@@ -854,7 +869,9 @@ app.put("/api/payments/:id", auth, allow(client_1.Role.MANAGER), async (req, res
         const apartment = level?.apartments.find((a) => a.number === apartmentNumber);
         if (!apartment)
             return res.status(400).json({ message: "Appartement invalide" });
-        amount = money(apartment.rentPrice);
+        expectedAmount = money(apartment.rentPrice);
+        if (!parsed.data.amount)
+            amount = expectedAmount;
     }
     const updated = await prisma.payment.update({
         where: { id },
@@ -865,6 +882,7 @@ app.put("/api/payments/:id", auth, allow(client_1.Role.MANAGER), async (req, res
             monthsCount: nextKind === client_1.PaymentKind.RENTAL_RENT ? nextMonthsCount : null,
             ...(parsed.data.tenantName ? { tenantName: parsed.data.tenantName.trim() } : {}),
             amount,
+            expectedAmount,
             ...(floor !== null ? { floor } : {}),
             ...(apartmentNumber !== null ? { apartmentNumber } : {}),
         },
@@ -1102,6 +1120,12 @@ app.get("/api/dashboard", auth, async (_req, res) => {
         tenantName: p.tenantName ?? "",
         contractFileUrl: p.contractFilePath ?? "",
         amount: money(p.amount),
+        expectedAmount: p.expectedAmount != null
+            ? money(p.expectedAmount)
+            : null,
+        remainingDue: p.expectedAmount != null
+            ? Math.max(0, money(Math.round((p.expectedAmount - p.amount) * 100) / 100))
+            : 0,
         date: p.date.toISOString(),
         notes: p.notes ?? "",
         floor: p.floor ?? null,

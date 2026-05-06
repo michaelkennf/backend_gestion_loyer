@@ -161,19 +161,20 @@ model RentalDepositTransaction {
 }
 
 model Payment {
-  id            String       @id @default(cuid())
-  propertyType  PropertyType
-  paymentKind   PaymentKind  @default(MONTHLY_PAYMENT)
-  tenantName    String?
+  id              String       @id @default(cuid())
+  propertyType    PropertyType
+  paymentKind     PaymentKind  @default(MONTHLY_PAYMENT)
+  tenantName      String?
   contractFilePath String?
-  month         String
-  monthsCount   Int?
-  amount        Float
-  notes         String?
-  floor         Int?
+  month           String
+  monthsCount     Int?
+  amount          Float
+  expectedAmount  Float?
+  notes           String?
+  floor           Int?
   apartmentNumber Int?
-  date          DateTime
-  createdById   String
+  date            DateTime
+  createdById     String
   createdBy     User         @relation(fields: [createdById], references: [id], onDelete: Restrict)
   houseId       String?
   house         House?       @relation(fields: [houseId], references: [id], onDelete: SetNull)
