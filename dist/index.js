@@ -20,7 +20,14 @@ const adapter_pg_1 = require("@prisma/adapter-pg");
 const pg_1 = require("pg");
 const zod_1 = require("zod");
 const app = (0, express_1.default)();
-const pool = new pg_1.Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new pg_1.Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 3000,
+});
+// Warm up the connection pool on startup so the first API call is not slow.
+pool.connect().then((client) => client.release()).catch(() => { });
 const adapter = new adapter_pg_1.PrismaPg(pool);
 const prisma = new client_1.PrismaClient({ adapter });
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";

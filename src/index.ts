@@ -16,7 +16,14 @@ import { Pool } from "pg";
 import { z } from "zod";
 
 const app = express();
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 3000,
+});
+// Warm up the connection pool on startup so the first API call is not slow.
+pool.connect().then((client) => client.release()).catch(() => {});
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
