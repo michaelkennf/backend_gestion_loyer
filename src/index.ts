@@ -1,6 +1,5 @@
 import "dotenv/config";
 import express from "express";
-import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import cors from "cors";
@@ -11,20 +10,15 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import multer from "multer";
 import { PrismaClient, Role, PropertyType, ExpenseType, PaymentKind } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
-import { Pool } from "pg";
+import { PrismaLibSql } from "@prisma/adapter-libsql";
 import { z } from "zod";
 
 const app = express();
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 3000,
-});
-// Warm up the connection pool on startup so the first API call is not slow.
-pool.connect().then((client) => client.release()).catch(() => {});
-const adapter = new PrismaPg(pool);
+const dbFile = process.env.DATABASE_URL
+  ? process.env.DATABASE_URL.replace("file:", "")
+  : path.resolve(process.cwd(), "locapro.db");
+const DB_URL = `file:${path.resolve(dbFile).replace(/\\/g, "/")}`;
+const adapter = new PrismaLibSql({ url: DB_URL });
 const prisma = new PrismaClient({ adapter });
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev-refresh-secret";
@@ -206,23 +200,14 @@ async function propertyExists(propertyType: "house" | "building" | "studio" | "l
 }
 
 async function getHouseByIdWithLayout(id: string) {
-  const rows = await prisma.$queryRaw<HouseRowWithLayout[]>`
-    SELECT "id","address","floors","apartments","rentPrice","isBuilding","createdById","createdAt","updatedAt","layout"
-    FROM "House"
-    WHERE "id" = ${id}
-    LIMIT 1
-  `;
-  const row = rows[0];
-  return row ? normalizeHouseRow(row) : null;
+  const row = await prisma.house.findUnique({ where: { id } });
+  if (!row) return null;
+  return normalizeHouseRow(row as HouseRowWithLayout);
 }
 
 async function listHousesWithLayout() {
-  const rows = await prisma.$queryRaw<HouseRowWithLayout[]>`
-    SELECT "id","address","floors","apartments","rentPrice","isBuilding","createdById","createdAt","updatedAt","layout"
-    FROM "House"
-    ORDER BY "createdAt" DESC
-  `;
-  return rows.map(normalizeHouseRow);
+  const rows = await prisma.house.findMany({ orderBy: { createdAt: "desc" } });
+  return rows.map((r) => normalizeHouseRow(r as HouseRowWithLayout));
 }
 
 async function updateHouseWithLayout(id: string, data: {
@@ -233,21 +218,21 @@ async function updateHouseWithLayout(id: string, data: {
   layout: unknown;
   isBuilding: boolean;
 }) {
-  await prisma.$executeRaw`
-    UPDATE "House"
-    SET "address" = ${data.address},
-        "floors" = ${data.floors},
-        "apartments" = ${data.apartments},
-        "rentPrice" = ${data.rentPrice},
-        "layout" = ${JSON.stringify(data.layout)}::jsonb,
-        "isBuilding" = ${data.isBuilding},
-        "updatedAt" = NOW()
-    WHERE "id" = ${id}
-  `;
+  await prisma.house.update({
+    where: { id },
+    data: {
+      address: data.address,
+      floors: data.floors,
+      apartments: data.apartments,
+      rentPrice: data.rentPrice,
+      layout: data.layout as object,
+      isBuilding: data.isBuilding,
+    },
+  });
 }
 
 async function deleteHouseById(id: string) {
-  await prisma.$executeRaw`DELETE FROM "House" WHERE "id" = ${id}`;
+  await prisma.house.delete({ where: { id } });
 }
 
 function allow(...roles: Role[]) {
@@ -298,34 +283,20 @@ async function storeIdempotentResponse(req: AuthRequest, status: number, body: u
   });
 }
 
-type RefreshTokenRow = {
-  id: string;
-  tokenHash: string;
-  userId: string;
-  expiresAt: Date;
-  createdAt: Date;
-};
-
 async function createRefreshTokenRecord(userId: string, tokenHash: string, expiresAt: Date) {
-  const id = randomUUID();
-  await prisma.$executeRaw`
-    INSERT INTO "RefreshToken" ("id", "tokenHash", "userId", "expiresAt", "createdAt")
-    VALUES (${id}, ${tokenHash}, ${userId}, ${expiresAt}, NOW())
-  `;
+  await prisma.refreshToken.create({ data: { userId, tokenHash, expiresAt } });
 }
 
 async function findRefreshTokensByUser(userId: string, limit: number) {
-  return prisma.$queryRaw<RefreshTokenRow[]>`
-    SELECT "id", "tokenHash", "userId", "expiresAt", "createdAt"
-    FROM "RefreshToken"
-    WHERE "userId" = ${userId} AND "expiresAt" > NOW()
-    ORDER BY "createdAt" DESC
-    LIMIT ${limit}
-  `;
+  return prisma.refreshToken.findMany({
+    where: { userId, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
 }
 
 async function deleteRefreshTokenById(id: string) {
-  await prisma.$executeRaw`DELETE FROM "RefreshToken" WHERE "id" = ${id}`;
+  await prisma.refreshToken.delete({ where: { id } });
 }
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
@@ -334,9 +305,9 @@ app.post("/api/auth/login", async (req, res) => {
   const schema = z.object({ username: z.string().trim().min(1), password: z.string().min(1) });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Payload invalide" });
-  const username = parsed.data.username.trim();
+  const username = parsed.data.username.trim().toLowerCase();
   const user = await prisma.user.findFirst({
-    where: { username: { equals: username, mode: "insensitive" } },
+    where: { username },
   });
   if (!user) {
     authDebugLog("login_user_not_found", { username });
@@ -460,7 +431,7 @@ app.post("/api/users", auth, allow(Role.ADMIN), async (req, res) => {
   const username = parsed.data.username.trim().toLowerCase();
   const { fullName, role, password, forceReset } = parsed.data;
   const existing = await prisma.user.findFirst({
-    where: { username: { equals: username, mode: "insensitive" } },
+    where: { username },
     select: { id: true },
   });
   if (existing) return res.status(409).json({ message: "Identifiant déjà utilisé" });

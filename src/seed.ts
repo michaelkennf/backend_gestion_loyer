@@ -1,11 +1,15 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config();
+import path from "path";
 import bcrypt from "bcryptjs";
 import { PrismaClient, Role } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
-import { Pool } from "pg";
+import { PrismaLibSql } from "@prisma/adapter-libsql";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
+const dbFile = process.env.DATABASE_URL
+  ? process.env.DATABASE_URL.replace("file:", "")
+  : path.resolve(process.cwd(), "locapro.db");
+const DB_URL = `file:${path.resolve(dbFile).replace(/\\/g, "/")}`;
+const adapter = new PrismaLibSql({ url: DB_URL });
 const prisma = new PrismaClient({ adapter });
 
 async function upsertUser(username: string, fullName: string, role: Role, password: string) {
